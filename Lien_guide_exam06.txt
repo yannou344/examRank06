@@ -1,0 +1,1057 @@
+Test:
+Terminal 0:
+gcc -Wall -Wextra -Werror mini_serv.c
+./a.out 8080
+
+Terminal 1: (Client 0): nc 127.0.0.1 8080
+
+server: client 1 just arrived
+server: client 2 just arrived
+Hello everyone
+client 2: Hello, how are you?
+client 1: I am fine
+server: client 2 just left
+server: client 3 just arrived
+client 3: Thank you
+
+Terminal 2: (Client 1): nc 127.0.0.1 8080
+
+server: client 2 just arrived
+client 0: Hello everyone
+client 2: Hello, how are you?
+I am fine
+server: client 2 just left
+server: client 3 just arrived
+client 3: Thank you
+
+Terminal 3: (Client 2): nc 127.0.0.1 8080
+client 0: Hello everyone
+Hello, how are you?
+client 1: I am fine
+lien@Lien:/mnt/d/exam_06/Lien$ { nc 127.0.0.1 8080 > /dev/null; }  
+(Test with non-blocking clients. To simulate a client that doesn’t read)
+Thank you
+
+nc 127.0.0.1 8080 → connects to your server at IP 127.0.0.1, port 8080.
+> /dev/null → discards everything the server sends back (this client never reads).
+The { ... ; } is just a shell grouping — not really important here, it runs the command in the same shell.
+
+| Test                   | Command                       | Expected Output             | Reason                   |
+| ---------------------- | ----------------------------- | --------------------------- | ------------------------ |
+| No argument            | `./a.out`                     | `Wrong number of arguments` | Missing port             |
+| Invalid port           | `./a.out abc`                 | `Fatal error`               | Bad argument to `bind()` |
+| Privileged port        | `./a.out 80`                  | `Fatal error`               | No permission            |
+| Port already used      | `./a.out 8080 & ./a.out 8080` | `Fatal error`               | Address in use           |
+| Memory fail (optional) | simulate malloc fail          | `Fatal error`               | Allocation failed        |
+
+lien@Lien:/mnt/d/exam_06/Lien$ sudo lsof -i :8080
+[sudo] password for lien:
+COMMAND PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+nc      953 lien    3u  IPv4   5935      0t0  TCP localhost:59792->localhost:http-alt (CLOSE_WAIT)
+nc      954 lien    3u  IPv4   5938      0t0  TCP localhost:59794->localhost:http-alt (CLOSE_WAIT)
+lien@Lien:/mnt/d/exam_06/Lien$ sudo kill 953 954
+
+Let’s go through each part carefully — the **variables** and the **functions/macros** you listed come from typical **C network programming** (using the `select()` system call for multiplexing I/O).
+
+---
+
+### 🧩 **Variables**
+
+#### `int ids[65536];`
+
+* This is an **array of integers** with 65,536 elements.
+* It’s probably used to **store IDs** for clients connected to a server (e.g., user IDs, socket descriptors, or other identifiers).
+* The number 65,536 (`2^16`) is large enough to handle a maximum number of simultaneous connections (often the max value for a TCP/UDP port number).
+
+---
+
+#### `char *msgs[65536];`
+
+* This is an **array of pointers to `char`**, i.e., **strings**.
+* Each element (`msgs[i]`) could store a **message string** associated with client `i` (for example, incoming or outgoing data buffers).
+
+---
+
+#### `fd_set rfds, wfds, afds;`
+
+These are of type `fd_set`, which is a **special data structure** used with the `select()` function for monitoring multiple file descriptors (sockets, in this case).
+
+* `rfds` → “**read file descriptors**” — used to check which sockets are ready for reading.
+* `wfds` → “**write file descriptors**” — used to check which sockets are ready for writing.
+* `afds` → “**active file descriptors**” — often used as the **master set** that keeps track of all currently connected clients.
+
+Example usage pattern:
+
+```c
+FD_ZERO(&afds);        // clear all bits
+FD_SET(server_fd, &afds); // add the server socket
+rfds = afds;           // copy afds into rfds before calling select()
+```
+
+---
+
+### ⚙️ **Functions and Macros**
+
+#### `if (FD_ISSET(fd, &wfds) && fd != author)`
+
+* `FD_ISSET(fd, &wfds)` checks if the file descriptor `fd` is **ready for writing** (i.e., it’s included in `wfds`).
+* The condition `fd != author` prevents sending data back to the client who originally sent it.
+* So the full line:
+
+  ```c
+  if (FD_ISSET(fd, &wfds) && fd != author)
+  ```
+
+  means “If this socket can be written to and it’s not the sender’s socket, then…”
+
+---
+
+#### `send(fd, str, strlen(str), 0);`
+
+* Sends the string `str` to the socket represented by file descriptor `fd`.
+* `strlen(str)` gives the number of bytes to send.
+* The last parameter `0` means “no special flags” (normal operation).
+* So this line actually **sends the message to all writable clients except the sender**.
+
+---
+
+#### `FD_SET(fd, &afds);`
+
+* Adds the file descriptor `fd` to the `afds` set.
+* Commonly used when a **new client connects**:
+
+  ```c
+  FD_SET(new_client_fd, &afds);
+  ```
+
+  This way, `select()` will monitor this new socket.
+
+---
+
+#### `FD_CLR(fd, &afds);`
+
+* Removes the file descriptor `fd` from the `afds` set.
+* Used when a client **disconnects or an error occurs**:
+
+  ```c
+  FD_CLR(client_fd, &afds);
+  close(client_fd);
+  ```
+
+  This stops monitoring that socket.
+
+---
+
+### 🧠 Putting It All Together
+
+Here’s a simplified example of how this might appear in a chat server:
+
+```c
+FD_ZERO(&afds);
+FD_SET(server_fd, &afds);
+
+while (1) {
+    rfds = afds;
+    wfds = afds;
+
+    select(FD_SETSIZE, &rfds, &wfds, NULL, NULL);
+
+    for (fd = 0; fd < FD_SETSIZE; fd++) {
+        if (FD_ISSET(fd, &rfds)) {
+            if (fd == server_fd) {
+                // new client connection
+                new_fd = accept(server_fd, NULL, NULL);
+                FD_SET(new_fd, &afds);
+            } else {
+                // message from existing client
+                recv(fd, buffer, sizeof(buffer), 0);
+                // broadcast to others
+                for (int i = 0; i < FD_SETSIZE; i++) {
+                    if (FD_ISSET(i, &wfds) && i != fd)
+                        send(i, buffer, strlen(buffer), 0);
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+### ✅ **Summary Table**
+
+| Symbol                          | Type          | Purpose                            |
+| ------------------------------- | ------------- | ---------------------------------- |
+| `ids[65536]`                    | `int` array   | Stores IDs for clients             |
+| `msgs[65536]`                   | `char*` array | Stores message strings per client  |
+| `rfds`                          | `fd_set`      | Monitored for **readable sockets** |
+| `wfds`                          | `fd_set`      | Monitored for **writable sockets** |
+| `afds`                          | `fd_set`      | Master set of **active sockets**   |
+| `FD_ISSET(fd, &wfds)`           | macro         | Checks if fd is **ready to write** |
+| `FD_SET(fd, &afds)`             | macro         | **Adds** fd to monitored set       |
+| `FD_CLR(fd, &afds)`             | macro         | **Removes** fd from monitored set  |
+| `send(fd, str, strlen(str), 0)` | function      | Sends message to socket            |
+
+---
+
+Would you like me to add a short visual diagram showing how `select()` and these `fd_set`s interact (like a timeline of reads/writes)? It helps a lot to see it visually.
+
+Excellent — that’s quite a detailed code snippet you’ve got there.
+Let’s go through it **line by line and section by section**, explaining *what it does*, *why it does it*, and *how it works together* in the context of a simple TCP server.
+
+---
+
+## 1. Function Definition
+
+```c
+int main(int ac, char **av)
+```
+
+* `ac` (argument count) and `av` (argument vector) are standard C parameters for `main`.
+* `ac` tells you how many arguments were passed to the program.
+* `av` is an array of strings representing those arguments.
+
+  * `av[0]` is the program name (e.g. `./a.out`)
+  * `av[1]`, `av[2]`, etc. are the user-supplied arguments.
+
+---
+
+## 2. Checking Arguments
+
+```c
+if (ac != 2)
+{
+    write(2, "Wrong number of arguments\n", 26);
+    exit(1);
+}
+```
+
+* The program expects **exactly one argument** — typically the port number to listen on.
+* If not, it prints an error message to **stderr** (file descriptor `2`) and exits.
+* `"Wrong number of arguments\n"` has 26 characters, which is why 26 is used as the `write()` length.
+
+---
+
+## 3. Validate Port Argument
+
+```c
+int port = atoi(av[1]);
+if (port <= 0 || port > 65535)
+    fatal_error();
+```
+
+* Converts the second argument to an integer (the port number).
+* Valid port numbers range from **1 to 65535**.
+* If it’s invalid, `fatal_error()` is called — this is a function (not shown here) that likely prints an error and exits.
+
+---
+
+## 4. Initialize File Descriptor Set
+
+```c
+FD_ZERO(&afds);
+```
+
+* `afds` (active file descriptor set) tracks all active sockets (server and clients).
+* `FD_ZERO()` initializes the set — clears all file descriptors from it.
+
+---
+
+## 5. Create Server Socket
+
+```c
+int sockfd = create_socket();
+```
+
+* This function (not shown here) presumably:
+
+  * Creates a socket with `socket(AF_INET, SOCK_STREAM, 0)` (for TCP).
+  * Sets socket options like `SO_REUSEADDR`.
+  * Returns the socket file descriptor.
+
+---
+
+## 6. Prepare Server Address
+
+```c
+struct sockaddr_in servaddr;
+bzero(&servaddr, sizeof(servaddr));
+servaddr.sin_family = AF_INET;
+servaddr.sin_addr.s_addr = htonl(2130706433);
+servaddr.sin_port = htons(atoi(av[1]));
+```
+
+* `servaddr` holds the server’s IP address and port.
+* `bzero()` sets all bytes in `servaddr` to 0.
+* `sin_family = AF_INET` → IPv4 socket.
+* `sin_addr.s_addr = htonl(2130706433)` → 2130706433 = `127.0.0.1` (loopback address).
+
+  * `htonl()` converts host byte order to network byte order (big-endian).
+* `sin_port = htons(port)` → convert the user-provided port to network byte order.
+
+---
+
+## 7. Bind Socket
+
+```c
+if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)))
+    fatal_error();
+```
+
+* `bind()` associates the socket with the given IP address and port.
+* If it fails (returns nonzero), the port might already be in use, or permissions are insufficient → `fatal_error()`.
+
+---
+
+## 8. Start Listening
+
+```c
+if (listen(sockfd, SOMAXCONN))
+    fatal_error();
+```
+
+* `listen()` puts the socket into *passive mode*, ready to accept connections.
+* `SOMAXCONN` is the system-defined max queue length for pending connections (often 128–4096 depending on OS).
+
+---
+
+## 9. Main Server Loop
+
+```c
+while (1)
+{
+    rfds = wfds = afds;
+
+    if (select(max_fd + 1, &rfds, &wfds, NULL, NULL) < 0)
+        fatal_error();
+```
+
+* This is the **event loop**.
+* `rfds` and `wfds` are copies of `afds`:
+
+  * `rfds` tracks sockets ready to read.
+  * `wfds` tracks sockets ready to write.
+* `select()` blocks until one or more sockets are ready.
+* `max_fd` is the highest-numbered file descriptor currently in use.
+
+---
+
+## 10. Iterate Over All File Descriptors
+
+```c
+for (int fd = 0; fd <= max_fd; fd++)
+{
+    if (!FD_ISSET(fd, &rfds))
+        continue;
+```
+
+* Loops through every possible file descriptor (up to `max_fd`).
+* Checks if the current `fd` is set in the `rfds` set (ready for reading).
+* If not, skip to the next one.
+
+---
+
+## 11. New Client Connection
+
+```c
+if (fd == sockfd)
+{
+    socklen_t addr_len = sizeof(servaddr);
+    int client_fd = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+    if (client_fd < 0)
+        fatal_error();
+    if (client_fd >= 0)
+    {
+        register_client(client_fd);
+        break ;
+    }
+}
+```
+
+* If `fd` is the **server socket**, it means a new client is connecting.
+* `accept()` returns a new socket (`client_fd`) for communicating with that client.
+* If it fails, call `fatal_error()`.
+* Otherwise, `register_client(client_fd)` adds the new client to the list of active FDs (probably adds to `afds` and updates `max_fd`).
+
+---
+
+## 12. Handle Existing Client Data
+
+```c
+else
+{
+    int read_bytes = recv(fd, buf_read, 1000, 0);
+    if (read_bytes <= 0)
+    {
+        remove_client(fd);
+        break ;
+    }
+    buf_read[read_bytes] = '\0';
+    msgs[fd] = str_join(msgs[fd], buf_read);
+    if (msgs[fd] == NULL)
+        fatal_error();
+    send_msg(fd);
+}
+```
+
+* If it’s **not** the server socket, it must be a **client socket**.
+* `recv()` reads data sent by the client (up to 1000 bytes).
+* If `read_bytes <= 0`, the client disconnected or an error occurred → `remove_client(fd)`.
+* Otherwise:
+
+  * Null-terminate the string.
+  * Append the data to a per-client message buffer (`msgs[fd]`).
+  * If memory allocation fails, call `fatal_error()`.
+  * Then `send_msg(fd)` processes or relays the message (implementation not shown).
+
+---
+
+## 13. Loop Never Exits Normally
+
+```c
+return 0;
+```
+
+* This is never reached unless `fatal_error()` internally exits.
+
+---
+
+## 14. Overall Summary
+
+This `main()` function implements a **simple multi-client TCP server using `select()`**:
+
+* It listens on a port given as a command-line argument.
+* Handles multiple clients concurrently without using threads.
+* Uses non-blocking multiplexing via `select()`.
+* Gracefully handles:
+
+  * Invalid input (bad arguments, bad ports)
+  * Socket errors (bind, listen, accept failures)
+  * Memory allocation errors
+  * Client disconnections
+
+---
+
+## 15. Supporting Functions (Inferred)
+
+| Function              | Likely Purpose                                          |
+| --------------------- | ------------------------------------------------------- |
+| `fatal_error()`       | Print error message and exit.                           |
+| `create_socket()`     | Create and configure TCP socket.                        |
+| `register_client(fd)` | Add new client to tracking structures and `afds`.       |
+| `remove_client(fd)`   | Close socket, clean up client data, remove from `afds`. |
+| `str_join(a, b)`      | Concatenate two strings (safe, allocating new memory).  |
+| `send_msg(fd)`        | Send data (e.g., broadcast message or reply).           |
+
+---
+
+Would you like me to **annotate the code with detailed comments** (i.e. a version of this code rewritten with inline explanations in C)?
+That might make it easier to follow line by line in the source file.
+
+Great — that’s an important line in your server loop.
+Let’s break it down **in depth** so you fully understand what’s happening and why it’s written that way:
+
+---
+
+## 🔹 The line
+
+```c
+if (select(max_fd + 1, &rfds, &wfds, NULL, NULL) < 0)
+    fatal_error();
+```
+
+---
+
+## 🔹 What `select()` does
+
+`select()` is a **system call** used to monitor multiple file descriptors (FDs) — such as sockets — simultaneously.
+
+It tells you *which ones are ready* for:
+
+* **reading** (`rfds`)
+* **writing** (`wfds`)
+* **exceptions** (`efds`, but `NULL` here — unused)
+
+It allows your program to:
+
+* Handle **multiple clients** without multithreading or busy waiting.
+* Efficiently wait until *something happens* on any socket.
+
+---
+
+## 🔹 Function prototype
+
+```c
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+           fd_set *exceptfds, struct timeval *timeout);
+```
+
+Parameters:
+
+| Argument    | Meaning                                                  |
+| ----------- | -------------------------------------------------------- |
+| `nfds`      | The highest-numbered FD you want to check, plus **1**.   |
+| `readfds`   | Set of FDs you want to check for readability.            |
+| `writefds`  | Set of FDs you want to check for writability.            |
+| `exceptfds` | Set of FDs you want to check for exceptions (NULL here). |
+| `timeout`   | How long to wait (NULL = wait forever).                  |
+
+Return value:
+
+* `> 0`: Number of FDs that are ready.
+* `0`: Timeout expired (no FDs ready).
+* `< 0`: Error (e.g., `EINTR`, `EBADF`).
+
+---
+
+## 🔹 Why `max_fd + 1`
+
+`select()` checks all file descriptors from **0 up to (nfds - 1)**.
+
+If your highest active file descriptor is `max_fd`,
+you must pass `max_fd + 1` so that it includes `max_fd` itself.
+
+Example:
+
+```c
+max_fd = 6;
+select(max_fd + 1, ...); // checks fd 0–6 inclusive
+```
+
+---
+
+## 🔹 Why it’s inside an `if` condition
+
+```c
+if (select(...) < 0)
+    fatal_error();
+```
+
+Because `select()` returns `-1` on error.
+
+Common reasons for failure:
+
+* One of the FDs is invalid (closed but not removed from set).
+* Interrupted by a signal (`EINTR`).
+* Internal OS-level error.
+
+So if something goes wrong, the program stops by calling `fatal_error()` —
+which probably prints an error and exits.
+
+---
+
+## 🔹 Before calling `select()`
+
+These lines are crucial:
+
+```c
+rfds = wfds = afds;
+```
+
+Because `select()` **modifies** the FD sets you pass in.
+
+* After `select()` returns:
+
+  * Each set (`rfds`, `wfds`) contains **only** the FDs that are ready.
+  * Others are cleared out.
+
+So you need to copy your “master set” (`afds`) into temporary sets (`rfds`, `wfds`) before every call, otherwise you’d lose track of which sockets exist.
+
+---
+
+## 🔹 What happens after `select()`
+
+Once `select()` returns successfully:
+
+* You loop through all possible FDs (0 → max_fd).
+* For each one:
+
+  * If `FD_ISSET(fd, &rfds)` → there’s data to read.
+  * If `FD_ISSET(fd, &wfds)` → it’s ready to write.
+
+That’s how the server decides:
+
+* Whether a new client is trying to connect (server socket ready).
+* Whether an existing client sent data (client socket ready).
+* Whether any sockets are ready to send queued data.
+
+---
+
+## 🔹 Summary
+
+| Concept          | Description                                                      |
+| ---------------- | ---------------------------------------------------------------- |
+| **Purpose**      | Wait for activity (read/write) on multiple sockets at once.      |
+| **Blocks until** | At least one FD is ready (since timeout = `NULL`).               |
+| **`max_fd + 1`** | Ensures the highest FD is checked.                               |
+| **Error check**  | `select() < 0` means failure → call `fatal_error()`.             |
+| **Efficiency**   | Avoids polling each socket individually — sleeps until activity. |
+
+---
+
+### ✅ In short
+
+This line is the **heart of your event loop**:
+
+> It pauses the server until one or more sockets become active,
+> then wakes up and handles them efficiently — all on a single thread.
+
+---
+
+Would you like me to show a **diagram** of how `select()` works internally (like which FDs are watched, how they change after it returns)? It’s a great visual to cement this concept.
+
+
+Excellent — that’s another crucial line in your server’s code.
+Let’s unpack exactly what this line does, **step by step**, both conceptually and technically.
+
+---
+
+## 🔹 The line
+
+```c
+int client_fd = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+```
+
+---
+
+## 🔹 Purpose of `accept()`
+
+`accept()` is a **system call** that:
+
+> Waits for an incoming connection on a listening socket (`sockfd`),
+> and when a client connects, it **creates a new socket** (`client_fd`)
+> dedicated to communication with that specific client.
+
+It’s one of the core functions in TCP servers.
+
+---
+
+## 🔹 Function prototype
+
+```c
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+```
+
+| Parameter | Meaning                                                                                                                                               |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sockfd`  | The **listening socket** created with `socket()` and `bind()` and set to listen with `listen()`.                                                      |
+| `addr`    | A pointer to a `sockaddr` structure that will be filled with the **client’s address** (IP, port).                                                     |
+| `addrlen` | A pointer to an integer that initially contains the size of `addr`; when `accept()` returns, it’s updated with the actual size of the client address. |
+
+Return value:
+
+* `≥ 0`: new socket file descriptor for the accepted connection.
+* `-1`: error (e.g., no pending connections, socket closed, or interrupted).
+
+---
+
+## 🔹 What happens conceptually
+
+When a TCP client connects (e.g., using `connect()` from another program):
+
+1. The connection request arrives and is placed in the **listen queue**.
+2. `accept()` takes the **first pending request** off that queue.
+3. The kernel:
+
+   * Creates a **new socket** for that specific client connection.
+   * Keeps the original `sockfd` open and still listening for *more* connections.
+4. Returns the new socket’s file descriptor → `client_fd`.
+
+---
+
+## 🔹 Why the cast: `(struct sockaddr *)&servaddr`
+
+In C, different address structures exist for different protocols:
+
+* IPv4: `struct sockaddr_in`
+* IPv6: `struct sockaddr_in6`
+* Generic: `struct sockaddr`
+
+The function `accept()` is protocol-agnostic — it expects the *generic* `struct sockaddr *`.
+
+But your server uses `sockaddr_in` (IPv4-specific),
+so you must cast the pointer:
+
+```c
+(struct sockaddr *)&servaddr
+```
+
+This tells the compiler: “Treat this IPv4 struct as a generic `sockaddr`.”
+
+---
+
+## 🔹 Why `addr_len` is passed by pointer
+
+`accept()` needs to know how much space it has to write the client’s address into.
+
+You initialize it like this:
+
+```c
+socklen_t addr_len = sizeof(servaddr);
+```
+
+Then pass its address:
+
+```c
+accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+```
+
+When the call returns:
+
+* The client’s IP and port are now stored in `servaddr`.
+* `addr_len` may be updated to the actual number of bytes used.
+
+---
+
+## 🔹 Typical use pattern
+
+```c
+struct sockaddr_in client_addr;
+socklen_t addr_len = sizeof(client_addr);
+
+int client_fd = accept(sockfd, (struct sockaddr *)&client_addr, &addr_len);
+if (client_fd < 0)
+    perror("accept");
+else
+    printf("New connection from %s:%d\n",
+           inet_ntoa(client_addr.sin_addr),
+           ntohs(client_addr.sin_port));
+```
+
+This way, you can **see which client** connected.
+
+In your code, `servaddr` is reused for simplicity, but usually you’d use a new variable like `client_addr`.
+
+---
+
+## 🔹 What happens next
+
+After this line:
+
+```c
+int client_fd = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+```
+
+* `client_fd` represents a **unique client socket**.
+* You can now:
+
+  * Read from it: `recv(client_fd, buffer, ...)`
+  * Write to it: `send(client_fd, message, ...)`
+* When done, close it: `close(client_fd)`.
+
+Meanwhile, the original `sockfd` stays open and continues to `accept()` more clients.
+
+---
+
+## 🔹 In your program’s context
+
+Here’s what your snippet does around it:
+
+```c
+if (fd == sockfd)
+{
+    socklen_t addr_len = sizeof(servaddr);
+    int client_fd = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+    if (client_fd < 0)
+        fatal_error();
+    if (client_fd >= 0)
+    {
+        register_client(client_fd);
+        break ;
+    }
+}
+```
+
+So:
+
+* When the listening socket (`sockfd`) becomes readable, it means **a new client is trying to connect**.
+* `accept()` retrieves that connection and returns `client_fd`.
+* If success → register the new client.
+* If failure → stop and call `fatal_error()`.
+
+---
+
+## 🔹 Summary Table
+
+| Step | What Happens                                                                        |
+| ---- | ----------------------------------------------------------------------------------- |
+| 1    | A client tries to connect to the server (TCP handshake begins).                     |
+| 2    | The OS puts that request into the listen queue.                                     |
+| 3    | `select()` marks `sockfd` as readable → there’s a pending connection.               |
+| 4    | Server calls `accept()`.                                                            |
+| 5    | OS removes the request from the queue and creates a new socket for that connection. |
+| 6    | `accept()` returns that new socket’s FD → `client_fd`.                              |
+| 7    | Server communicates with the client using `client_fd`.                              |
+| 8    | The original `sockfd` keeps listening for new clients.                              |
+
+---
+
+✅ **In short:**
+
+> `accept()` waits for an incoming connection on a listening socket,
+> and when a client connects, it returns a *new* socket file descriptor
+> dedicated to that specific client.
+
+---
+
+Would you like me to show a **diagram** of how sockets are duplicated during `accept()` (i.e., one listening socket → multiple client sockets)?
+It’s a great visual for understanding how multiple clients share one server port.
+
+
+
+Excellent — you’re asking *exactly* the right kind of question.
+Let’s go through your `main()` step by step and explain **what its purpose is** and what each part does — like a detailed roadmap of the program.
+
+---
+
+## 🧩 Purpose of this `main()` function
+
+This `main()` is the **entry point** of your **multi-client chat server**.
+
+Its job is to:
+
+1. **Set up the listening server socket** on a given port (e.g., 8080).
+2. **Accept new client connections.**
+3. **Receive messages from clients.**
+4. **Broadcast those messages** to all other connected clients.
+
+It’s a typical “event-driven” server built using `select()` to handle multiple clients **simultaneously**.
+
+---
+
+## 🧠 Let’s break it down line-by-line
+
+---
+
+### 🧩 1️⃣ Argument validation
+
+```c
+if (ac != 2)
+{
+    write(2, "Wrong number of arguments\n", 26);
+    exit(1);
+}
+```
+
+* The program expects **exactly one argument**: the **port number**.
+* `ac` = argument count (`argc`).
+* `av` = argument vector (list of strings, `argv`).
+
+So you run it like this:
+
+```bash
+./server 8080
+```
+
+If you forget the port number, it prints an error and exits.
+
+---
+
+### 🧩 2️⃣ Parse and validate the port
+
+```c
+int port = atoi(av[1]);
+if (port <= 0 || port > 65535)
+    fatal_error();
+```
+
+* Converts the port number (a string) to an integer.
+* Valid port numbers are between **1 and 65535**.
+* If invalid, it calls `fatal_error()` (which prints “fatal error” and exits).
+
+---
+
+### 🧩 3️⃣ Initialize the master file descriptor set
+
+```c
+FD_ZERO(&afds);
+```
+
+* Clears the `afds` set (all file descriptors start as “not tracked”).
+* This will later hold **every socket** the server is monitoring — both the main listening socket and all client sockets.
+
+---
+
+### 🧩 4️⃣ Create the listening socket
+
+```c
+int sockfd = create_socket();
+```
+
+This calls your helper function:
+
+```c
+int create_socket() {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+        fatal_error();
+    FD_SET(sockfd, &afds);
+    max_fd = sockfd;
+    return sockfd;
+}
+```
+
+✅ Purpose:
+Creates a **TCP socket** (`SOCK_STREAM`) using IPv4 (`AF_INET`) and adds it to the monitored file descriptor set.
+
+---
+
+### 🧩 5️⃣ Configure the server address
+
+```c
+struct sockaddr_in servaddr;
+bzero(&servaddr, sizeof(servaddr));
+
+servaddr.sin_family = AF_INET;
+servaddr.sin_addr.s_addr = htonl(2130706433); // 127.0.0.1
+servaddr.sin_port = htons(port);
+```
+
+* Fills in the address structure for the server.
+* `2130706433` is `127.0.0.1` in integer form.
+* `htons()` converts the port number from host byte order to network byte order (big-endian).
+* This means your server will **listen on localhost**.
+
+---
+
+### 🧩 6️⃣ Bind the socket
+
+```c
+if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)))
+    fatal_error();
+```
+
+* Binds the socket to the local IP and port you just defined.
+* If another program is already using the port, `bind()` fails → `fatal_error()`.
+
+---
+
+### 🧩 7️⃣ Start listening for incoming connections
+
+```c
+if (listen(sockfd, SOMAXCONN))
+    fatal_error();
+```
+
+* Tells the OS to start **listening** for client connections.
+* `SOMAXCONN` = maximum number of queued pending connections.
+
+---
+
+### 🧩 8️⃣ The main server loop
+
+```c
+while (1)
+{
+    rfds = wfds = afds;
+    if (select(max_fd + 1, &rfds, &wfds, NULL, NULL) < 0)
+        fatal_error();
+```
+
+* This loop runs **forever**.
+* `select()` waits until:
+
+  * A socket is ready to read (`rfds`)
+  * Or ready to write (`wfds`)
+* When something happens (a new client connects or sends data), `select()` returns.
+
+---
+
+### 🧩 9️⃣ Handle ready file descriptors
+
+```c
+for (int fd = 0; fd <= max_fd; fd++)
+{
+    if (!FD_ISSET(fd, &rfds))
+        continue;
+```
+
+* Loops through all open sockets.
+* Checks which sockets are **ready for reading**.
+
+---
+
+### 🧩 10️⃣ Accept new clients
+
+```c
+if (fd == sockfd)
+{
+    socklen_t addr_len = sizeof(servaddr);
+    int client_fd = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+    if (client_fd < 0)
+        fatal_error();
+    register_client(client_fd);
+    break;
+}
+```
+
+* If the ready descriptor is the **main listening socket**, it means a client is trying to connect.
+* `accept()` creates a **new socket** for that client.
+* `register_client()`:
+
+  * Assigns it an ID,
+  * Adds it to `afds`,
+  * Notifies other clients that a new one joined.
+
+---
+
+### 🧩 11️⃣ Receive and broadcast client messages
+
+```c
+int read_bytes = recv(fd, buf_read, 1000, 0);
+if (read_bytes <= 0)
+{
+    remove_client(fd);
+    break;
+}
+buf_read[read_bytes] = '\0';
+msgs[fd] = str_join(msgs[fd], buf_read);
+if (msgs[fd] == NULL)
+    fatal_error();
+send_msg(fd);
+```
+
+* Reads data from a connected client.
+* If `recv()` returns 0 or −1 → client disconnected → `remove_client(fd)`.
+* Otherwise, append data to the client’s message buffer (`msgs[fd]`).
+* `send_msg(fd)` broadcasts the completed message to all other clients.
+
+---
+
+### 🧩 12️⃣ End of loop
+
+After processing all sockets, the loop repeats indefinitely — the server keeps listening and forwarding messages forever.
+
+---
+
+## ⚙️ In summary
+
+| Stage | Purpose                                       |
+| ----- | --------------------------------------------- |
+| 1     | Check argument count                          |
+| 2     | Parse and validate port number                |
+| 3     | Initialize `fd_set` for sockets               |
+| 4     | Create the listening TCP socket               |
+| 5     | Configure address (127.0.0.1:PORT)            |
+| 6     | Bind the socket                               |
+| 7     | Listen for new clients                        |
+| 8     | Wait for activity (`select()`)                |
+| 9     | Accept new clients or read from existing ones |
+| 10    | Broadcast messages to all other clients       |
+
+---
+
+### 💬 In plain English:
+
+Your `main()` creates a **tiny chat server** that:
+
+* Starts on a given port (e.g., 8080),
+* Accepts many clients at once,
+* Reads what each client sends,
+* And sends that message to everyone else.
+
+---
+
+If you’d like, I can give you a **cleaned-up, compilable version** of this `main()` with all syntax issues fixed (missing semicolons, typos like `{fd]`, etc.) so you can build and test it right away — would you like that?
+
+
