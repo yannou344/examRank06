@@ -57,7 +57,6 @@ char *str_join(char *buf, char *add)
 
 int main() {
 	int sockfd, connfd, len;
-	
 	struct sockaddr_in servaddr, cli; 
 
 	// socket create and verification 
@@ -76,7 +75,8 @@ int main() {
 	servaddr.sin_port = htons(8081); 
 
 	// Binding newly created socket to given IP and verification 
-	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) { 
+	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) 
+            != 0) { 
 		printf("socket bind failed...\n"); 
 		exit(0); 
 	} 

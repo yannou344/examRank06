@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <netinet/ip.h>
+#include <sys/select.h>
 
 int		count = 0, max_fd = 0;
 int		ids[65536];
@@ -27,7 +28,8 @@ int extract_message(char **buf, char **msg)
 	{
 		if ((*buf)[i] == '\n')
 		{
-			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			newbuf = calloc(1, sizeof(*newbuf) 
+				* (strlen(*buf + i + 1) + 1));
 			if (newbuf == 0)
 				return (-1);
 			strcpy(newbuf, *buf + i + 1);
