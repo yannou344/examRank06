@@ -67,6 +67,16 @@ char *str_join(char *buf, char *add)
 	return (newbuf);
 }
 
+void initParam(t_parameter *param){
+	param->maxFd = 0;
+	param->sockFd = 0;
+	param->clientCounter = 0;
+	// for (int i = 0; i < 1024; i++)
+	// 	param->bufRead[i] = '\0';
+	// for (int i = 0; i < 42; i++)
+	// 	param->bufWrite[i] = '\0';
+}
+
 int fatalError(){
 	write(2, "fatal error\n", 12);
 	exit(0);
@@ -81,34 +91,30 @@ int createSocket(t_parameter *param){
 	else{
 		printf("Socket successfully created..\n"); 
 	}
+	FD_SET(param->sockFd, &param->activeFds);
 	return param->sockFd;
 		
 }
 
-void initParam(t_parameter *param){
-	param->maxFd = 0;
-	param->sockFd = 0;
-	param->clientCounter = 0;
-	for (int i = 0; i < 1024; i++)
-		param->bufRead[i] = '\0';
-	for (int i = 0; i < 1024; i++)
-		param->bufWrite[i] = '\0';
-}
+
 
 void warningMessage(int clientFd, char *str, t_parameter *param){
 	for (int fd = 0; fd <= param->maxFd; ++fd){
+		printf("fd = %d\n", fd);
 		if (fd != clientFd && fd != param->sockFd 
-			&& FD_ISSET(fd, &param->activeFds)){
-				send(fd, str, sizeof(str), 0);
-			}
+				&& FD_ISSET(fd, &param->activeFds)){
+			send(fd, str, strlen(str), 0);
+			printf("warning message sent to client %d\n", param->ids[clientFd]);
+		}
 	}
+	
 }
 
 void registerClient(int clientFd, t_parameter *param){
 	param->maxFd = (param->maxFd < clientFd) ? clientFd : param->maxFd;
 	FD_SET(clientFd, &param->activeFds);
 	param->ids[clientFd] = param->clientCounter++;
-	sprintf(param->bufWrite, "server: client %d just arrived", 
+	sprintf(param->bufWrite, "server: client %d just arrived\n", 
 		param->ids[clientFd]);
 	warningMessage(clientFd, param->bufWrite, param);
 }
@@ -116,7 +122,7 @@ void registerClient(int clientFd, t_parameter *param){
 void removeClient(int clientFd, t_parameter *param){
 	FD_CLR(clientFd, &param->activeFds);
 	free (param->msg[clientFd]);
-	sprintf(param->bufWrite, "server: client %d just left", 
+	sprintf(param->bufWrite, "server: client %d just left\n", 
 		param->ids[clientFd]);
 	warningMessage(clientFd, param->bufWrite, param);
 	close(clientFd);
@@ -162,38 +168,44 @@ int main() {
 		printf("Socket successfully binded..\n");
 	}
 
-	if (listen(param.sockFd, 10) != 0) {
+	if (listen(param.sockFd, SOMAXCONN) != 0) { //10
 		printf("cannot listen\n"); 
 		fatalError();
 	}
 
 	while(1){ 
 		param.readyReadFds = param.activeFds;
-		if (select(param.maxFd + 1, &param.activeFds, NULL, NULL,
+		printf("waiting for any event\n"); 
+		if (select(param.maxFd + 1, &param.readyReadFds, NULL, NULL,
 			 	NULL) < 0)
 			fatalError();
+		printf("event occured\n"); 
 		for (int fd = 0; fd <= param.maxFd; ++fd){
-			if (!FD_ISSET(fd, &param.activeFds))
+			if (!FD_ISSET(fd, &param.readyReadFds))
 				continue;
 			if (fd == param.sockFd){
 				len = sizeof(cli);
 				int clientFd = accept(param.sockFd, 
 					(struct sockaddr *)&cli, &len);
 				if ( clientFd < 0){ 
-					printf("server acccept failed...\n");
+					printf("server accept failed...\n");
 					fatalError();
 				}
-				printf("server acccept the client...\n");
+				printf("server accept the client...\n");
 				registerClient(clientFd, &param);
 				break;
 			}
 			else {
+				printf("client already existing\n"); 
 				ssize_t sizeRecv = recv(fd, param.bufRead, 1023, 0);
-				if (sizeRecv < 0){
+				if (sizeRecv <= 0){
 					printf("reception message failed...\n");
 					removeClient(fd, &param);
+					break;
 				}
-				param.bufRead[sizeof param.bufRead] = '\0';
+				param.bufRead[sizeRecv] = '\0';
+				printf("reception message from client %d: %s\n", param.ids[fd],
+					param.bufRead);
 				param.msg[fd] = str_join(param.msg[fd], param.bufRead);
 				if (param.msg[fd] == NULL) // memory allocation failure
                     fatalError();

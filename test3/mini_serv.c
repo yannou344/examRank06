@@ -21,12 +21,6 @@ typedef struct s_parameter
     char bufWrite[42];
 }t_parameter;
 
-void initStruct(t_parameter *param){
-    param->maxFd = 0;
-    param->sockFd = 0;
-    param->clientCount = 0;
-}
-
 int extract_message(char **buf, char **msg)
 {
 	char	*newbuf;
@@ -72,6 +66,12 @@ char *str_join(char *buf, char *add)
 	free(buf);
 	strcat(newbuf, add);
 	return (newbuf);
+}
+
+void initStruct(t_parameter *param){
+    param->maxFd = 0;
+    param->sockFd = 0;
+    param->clientCount = 0;
 }
 
 int fatalError(){
